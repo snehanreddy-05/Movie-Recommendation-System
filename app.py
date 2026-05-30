@@ -1,184 +1,277 @@
 import streamlit as st
+import pickle
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+session = requests.Session()
 
-from nltk.stem.porter import PorterStemmer
-
-# -----------------------------
-# PAGE TITLE
-# -----------------------------
-
-st.title("Movie Recommendation System 🎬")
-
-st.write(
-    "AI-powered movie recommendation app using NLP and Machine Learning."
+retry = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504]
 )
 
-# -----------------------------
-# LOAD DATA
-# -----------------------------
+session.mount("https://", HTTPAdapter(max_retries=retry))
 
-df = pd.read_csv("movies.csv")
-st.write(df.head())
+# ---------------- PAGE CONFIG ---------------- #
 
-st.write(df.columns)
+st.set_page_config(
+    page_title="Movie Recommendation System",
+    page_icon="🎬",
+    layout="wide"
+)
+st.markdown("""
+<style>
 
-# -----------------------------
-# NLP STEMMING
-# -----------------------------
+body {
+    background-color: #0E1117;
+}
 
-ps = PorterStemmer()
+.main {
+    background-color: #0E1117;
+}
+
+h1 {
+    color: #E50914;
+    text-align: center;
+    font-size: 55px;
+}
+
+.stButton>button {
+    background-color: #E50914;
+    color: white;
+    border-radius: 10px;
+    height: 50px;
+    width: 200px;
+    font-size: 20px;
+    font-weight: bold;
+}
+
+.stButton>button:hover {
+    background-color: #ff4b4b;
+    color: white;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- LOAD DATA ---------------- #
+
+movies = pickle.load(open("movies.pkl", "rb"))
+similarity = pickle.load(open("similarity.pkl", "rb"))
+
+movies_list = movies["Movie"].values
+
+# ---------------- TMDB API ---------------- #
+
+api_key = "6748346fc48a05a6d569f35c79943651"
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+trending_url = f"https://api.themoviedb.org/3/trending/movie/day?api_key={api_key}"
 
 
-def stem(text):
-
-    words = text.split()
-
-    stemmed_words = []
-
-    for word in words:
-
-        stemmed_words.append(ps.stem(word))
-
-    return " ".join(stemmed_words)
-
-
-# -----------------------------
-# CREATE TAGS
-# -----------------------------
-
-df["tags"] = df["Genre"] + " " + df["Description"]
-
-df["tags"] = df["tags"].apply(stem)
-
-# -----------------------------
-# TF-IDF
-# -----------------------------
-
-tfidf = TfidfVectorizer(stop_words="english")
-
-matrix = tfidf.fit_transform(df["tags"])
-
-# -----------------------------
-# SIMILARITY
-# -----------------------------
-
-similarity = cosine_similarity(matrix)
-
-# -----------------------------
-# FETCH POSTER FROM TMDB
-# -----------------------------
-
-
-def fetch_poster(movie_name):
+@st.cache_data(ttl=3600)
+def fetch_movie_details(movie_name):
 
     try:
 
-        api_key = "6748346fc48a05a6d569f35c79943651"
+        search_url = f"https://api.themoviedb.org/3/search/movie?api_key={api_key}&query={movie_name}"
 
-        url = f"https://api.themoviedb.org/3/search/movie?api_key={api_key}&query={movie_name}"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=10
-        )
+        response = session.get(
+    search_url,
+    headers=headers,
+    timeout=10
+)
 
         data = response.json()
 
-        if data["results"]:
+        results = data.get("results")
 
-            poster_path = data["results"][0].get("poster_path")
+        if results and len(results) > 0:
+
+            movie = results[0]
+
+            poster_path = movie.get("poster_path")
+
+            rating = movie.get("vote_average", "N/A")
+
+            release_date = movie.get("release_date", "Unknown")
+
+            year = release_date[:4] if release_date != "Unknown" else "N/A"
 
             if poster_path:
 
-                return (
-                    "https://image.tmdb.org/t/p/w500/"
-                    + poster_path
-                )
+                poster_url = "https://image.tmdb.org/t/p/w500/" + poster_path
 
-    except Exception as e:
+            else:
 
-        print("TMDB Error:", e)
+                poster_url = "https://via.placeholder.com/300x450?text=No+Poster"
 
-    return ""
+            overview = movie.get("overview", "No description available.")
 
+            return poster_url, rating, year, overview
 
-# -----------------------------
-# RECOMMEND FUNCTION
-# -----------------------------
-
-
-def recommend(movie_name):
-
-    movie_index = df[df["Movie"] == movie_name].index[0]
-
-    scores = list(enumerate(similarity[movie_index]))
-
-    sorted_scores = sorted(
-        scores,
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    recommended_movies = []
-
-    for item in sorted_scores[1:4]:
-
-        index = item[0]
-
-        similarity_score = round(item[1] * 100, 2)
-
-        movie_title = df.iloc[index]["Movie"]
-
-        poster = ""
-
-        recommended_movies.append(
-            (
-                movie_title,
-                similarity_score,
-                poster
-            )
-        )
-
-    return recommended_movies
-
-
-# -----------------------------
-# SELECT MOVIE
-# -----------------------------
-
-movie = st.selectbox(
-    "Select Movie",
-    df["Movie"].tolist()
+        return (
+    "https://via.placeholder.com/300x450?text=No+Poster",
+    "N/A",
+    "N/A",
+    "No description available."
 )
 
-# -----------------------------
-# BUTTON
-# -----------------------------
+    except Exception as e:
+        st.error(f"TMDB Request Failed: {e}")
 
-if st.button("Recommend"):
+        return (
+    "https://via.placeholder.com/300x450?text=Error",
+    "N/A",
+    "N/A",
+    "Could not fetch description."
+)
 
-    recommendations = recommend(movie)
+import requests
 
-    st.success("Top Recommendations")
+@st.cache_data(ttl=3600)
+def fetch_trending_movies():
+    try:
+        response = session.get(
+    trending_url,
+    headers=headers,
+    timeout=10
+)
+        response.raise_for_status()
+        data = response.json()
 
-    cols = st.columns(3)
+        trend_names = []
+        trend_posters = []
 
-    for idx, (movie, score, poster) in enumerate(recommendations):
+        for movie in data.get("results", [])[:5]:
+            trend_names.append(movie.get("title", "Unknown"))
+            poster_path = movie.get("poster_path")
 
-        with cols[idx]:
+            if poster_path:
+                trend_posters.append("https://image.tmdb.org/t/p/w500/" + poster_path)
+            else:
+                trend_posters.append("https://via.placeholder.com/300x450")
 
-            if poster:
-                st.image(poster, width=150)
+        return trend_names, trend_posters
 
-            st.write(movie)
+    except Exception as e:
+        print("API Error:", e)
+        return [], []
+# ---------------- RECOMMEND FUNCTION ---------------- #
 
-            st.write(f"{score}% similar")
+def recommend(movie):
+    try:
+        movie_index = movies[movies["Movie"] == movie].index[0]
+        distances = similarity[movie_index]
+
+        movie_list = sorted(
+            list(enumerate(distances)),
+            reverse=True,
+            key=lambda x: x[1]
+        )[1:6]
+
+        recommended_movies = []
+        recommended_posters = []
+        recommended_ratings = []
+        recommended_years = []
+        recommended_overviews = []
+
+        for i in movie_list:
+            name = movies.iloc[i[0]].Movie
+
+            poster, rating, year, overview = fetch_movie_details(name)
+            recommended_overviews.append(overview)
+
+            recommended_movies.append(name)
+            recommended_posters.append(poster)
+            recommended_ratings.append(rating)
+            recommended_years.append(year)
+
+        return (
+    recommended_movies,
+    recommended_posters,
+    recommended_ratings,
+    recommended_years,
+    recommended_overviews
+)
+
+    except Exception as e:
+        print("Recommendation Error:", e)
+        return [], [], [], []
+
+
+# ---------------- TITLE ---------------- #
+
+st.markdown("""
+<h1>
+🎬 NETFLIX MOVIE RECOMMENDER
+</h1>
+""", unsafe_allow_html=True)
+st.markdown(
+    "<h3 style='text-align:center;'>Find movies similar to your favorites 🍿</h3>",
+    unsafe_allow_html=True
+)
+
+st.markdown("---")
+st.write("")
+
+# ---------------- SELECT MOVIE ---------------- #
+st.subheader("🔥 Trending Movies")
+
+trend_names, trend_posters = fetch_trending_movies()
+
+if trend_names and trend_posters:
+    cols = st.columns(5)
+
+    for i in range(min(5, len(trend_names))):
+        with cols[i]:
+            st.image(trend_posters[i], width="stretch")
+            st.caption(trend_names[i])
+else:
+    st.warning("Trending movies not available right now.")
+
+st.markdown("---")
+selected_movie = st.selectbox(
+    "🔍 Search your favorite movie",
+    sorted(movies_list)
+)
+
+# ---------------- BUTTON ---------------- #
+
+if st.button("🚀 Recommend"):
+
+    with st.spinner("Finding awesome movies for you... 😎"):
+
+       names, posters, ratings, years, overviews = recommend(selected_movie)
+
+    st.write("")
+    st.subheader("Recommended Movies 🍿")
+
+    cols = st.columns(5)
+
+    for i in range(min(len(names), len(posters), len(ratings), len(years))):
+
+       with cols[i]:
+
+          st.image(
+    posters[i],
+    width="stretch"
+)
+
+          st.markdown(
+            f"<h4 style='text-align:center; color:white;'>{names[i]}</h4>",
+            unsafe_allow_html=True
+         )
+
+          st.write(f"⭐ Rating: {ratings[i]}")
+
+          st.write(f"📅 Year: {years[i]}")
+          st.markdown(
+    f"<p style='font-size:13px; color:#cccccc;'>{overviews[i][:120]}...</p>",
+    unsafe_allow_html=True
+)
